@@ -19,7 +19,7 @@
 1. 安装浏览器扩展 Tampermonkey。
 2. 新建用户脚本。
 3. 将 `yuketang.helper.js` 的内容粘贴进去并保存。
-4. 打开雨课堂结果页：
+4. 打开雨课堂答题页：
 
 ```text
 https://changjiang-exam.yuketang.cn/*
