@@ -20,7 +20,9 @@
     requestTimeoutMs: 60000,
     questionMode: "single-choice",
     imageFetchConcurrency: 2,
-    renderEvery: 3,
+    renderEvery: 1,
+    maxEnhancedImagesPerQuestion: 12,
+    enhancedSearchPadding: 220,
     imageMaxWidth: 1400,
     imageMaxHeight: 1400,
     imageQuality: 0.82,
@@ -42,8 +44,12 @@
     running: false,
     data: [],
     panel: null,
+    orbNode: null,
     statusNode: null,
     listNode: null,
+    answeringIndex: null,
+    retryingIndex: null,
+    workflowRunning: false,
     drag: null
   };
 
@@ -132,12 +138,20 @@
     );
   }
 
+  function isInsideHelperUi(node) {
+    return Boolean(node?.closest?.(".ykt-study-panel, .ykt-mini-orb"));
+  }
+
   function pickQuestionBlocks() {
     const nodes = Array.from(
       document.querySelectorAll(SELECTORS.questionContainers.join(","))
     );
 
     const candidates = nodes.filter((node) => {
+      if (isInsideHelperUi(node)) {
+        return false;
+      }
+
       const text = normalizeText(node.innerText);
       if (!likelyQuestionBlockText(text)) {
         return false;
@@ -175,8 +189,91 @@
 
   function findQuestionImages(block) {
     return Array.from(block.querySelectorAll("img"))
+      .filter((img) => !isInsideHelperUi(img))
       .filter((img) => isLikelyQuestionImage(img))
       .slice(0, CONFIG.maxImagesPerQuestion);
+  }
+
+  function countQuestionMarkers(text) {
+    const compact = normalizeText(text);
+    return SELECTORS.questionHints.reduce((count, hint) => {
+      const matches = compact.match(new RegExp(hint, "g")) || [];
+      return count + matches.length;
+    }, 0);
+  }
+
+  function findExpandedQuestionBlock(block) {
+    let best = block;
+    let current = block.parentElement;
+    let depth = 0;
+
+    while (current && depth < 4) {
+      if (isInsideHelperUi(current)) {
+        break;
+      }
+
+      const text = cleanQuestionText(current.innerText || "");
+      const imageCount = current.querySelectorAll("img").length;
+      const markerCount = countQuestionMarkers(text);
+      const isReasonableScope =
+        text.length <= CONFIG.maxTextLengthPerQuestion * 1.5 &&
+        imageCount <= CONFIG.maxEnhancedImagesPerQuestion * 2 &&
+        markerCount <= 2;
+
+      if (isReasonableScope && imageCount >= best.querySelectorAll("img").length) {
+        best = current;
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return best;
+  }
+
+  function rectsNear(a, b, padding) {
+    return !(
+      b.right < a.left - padding ||
+      b.left > a.right + padding ||
+      b.bottom < a.top - padding ||
+      b.top > a.bottom + padding
+    );
+  }
+
+  function dedupeImageElements(images) {
+    const seen = new Set();
+    return images.filter((img) => {
+      const src = img.currentSrc || img.src || img.getAttribute("data-src") || "";
+      const rect = img.getBoundingClientRect();
+      const key = src || `${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function findEnhancedQuestionImages(block) {
+    const expandedBlock = findExpandedQuestionBlock(block);
+    const baseImages = Array.from(expandedBlock.querySelectorAll("img"));
+    const blockRect = expandedBlock.getBoundingClientRect();
+    const nearbyImages = Array.from(document.querySelectorAll("img")).filter((img) => {
+      if (isInsideHelperUi(img) || !isLikelyQuestionImage(img)) {
+        return false;
+      }
+      return rectsNear(blockRect, img.getBoundingClientRect(), CONFIG.enhancedSearchPadding);
+    });
+
+    return dedupeImageElements([...baseImages, ...nearbyImages])
+      .filter((img) => !isInsideHelperUi(img))
+      .filter((img) => isLikelyQuestionImage(img))
+      .sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        return ar.top === br.top ? ar.left - br.left : ar.top - br.top;
+      })
+      .slice(0, CONFIG.maxEnhancedImagesPerQuestion);
   }
 
   function findImageUrls(block) {
@@ -355,21 +452,73 @@
       type: parseQuestionType(rawText),
       imageUrls,
       imageDataUrls: [],
+      sourceBlock: block,
+      enhancedRetryCount: 0,
       rawBlockText: rawText,
       studySummary: "",
       analysisRaw: ""
     };
   }
 
-  function getAnswerClass(answer) {
+  async function hydrateQuestionImages(question, block, options = {}) {
+    const enhanced = Boolean(options.enhanced);
+    const sourceBlock = enhanced ? findExpandedQuestionBlock(block) : block;
+    const questionImages = enhanced
+      ? findEnhancedQuestionImages(sourceBlock)
+      : findQuestionImages(sourceBlock);
+
+    if (enhanced) {
+      const expandedText = cleanQuestionText(sourceBlock.innerText || "").slice(
+        0,
+        CONFIG.maxTextLengthPerQuestion
+      );
+      question.rawBlockText = expandedText || question.rawBlockText;
+      question.type = question.type || parseQuestionType(expandedText);
+    }
+
+    question.imageUrls = dedupeStrings(
+      questionImages.map(
+        (img) => img.currentSrc || img.src || img.getAttribute("data-src") || ""
+      )
+    );
+    question.imageDataUrls = [];
+
+    for (let imageIndex = 0; imageIndex < questionImages.length; imageIndex += 1) {
+      setStatus(
+        `${enhanced ? "增强获取" : "正在获取"}第 ${question.index} 题题图，第 ${imageIndex + 1}/${questionImages.length} 张...`
+      );
+      question.imageDataUrls.push(
+        await imageElementToDataUrl(questionImages[imageIndex])
+      );
+    }
+
+    return question;
+  }
+
+  function getAnswerClass(answer, options = {}) {
     const value = normalizeText(answer);
     if (/^[A-D]$/.test(value)) {
       return "is-ready";
     }
-    if (value === "X" || value.includes("未")) {
+    if (
+      value === "X" ||
+      value.includes("未") ||
+      (options.pendingMuted && value.includes("生成中"))
+    ) {
       return "is-muted";
     }
     return "";
+  }
+
+  function isRetryableAnswer(answer) {
+    const value = normalizeText(answer);
+    return (
+      !value ||
+      value === "X" ||
+      value.includes("未识别") ||
+      value.includes("未获取") ||
+      value.includes("无法")
+    );
   }
 
   function renderImagePreview(item) {
@@ -409,7 +558,9 @@
     const questionCards = items
       .map((item) => {
         const detailPreview = escapeHtml(
-          `已获取题图：${item.imageDataUrls?.length || 0} 张`
+          `已获取题图：${item.imageDataUrls?.length || 0} 张${
+            item.enhancedRetryCount ? " · 已增强采集" : ""
+          }`
         );
         const summaryPreview = escapeHtml(item.studySummary || "");
         return [
@@ -422,7 +573,7 @@
           "</div>",
           "<div class='ykt-meta-row'>",
           `<span>${detailPreview}</span>`,
-          `<strong class='${getAnswerClass(summaryPreview)}'>${summaryPreview || "未生成"}</strong>`,
+          `<strong class='${getAnswerClass(summaryPreview || "生成中")}'>${summaryPreview || "生成中"}</strong>`,
           "</div>",
           renderImagePreview(item),
           "</article>"
@@ -430,24 +581,43 @@
       })
       .join("");
 
-    const answerRows = items
+    const visibleSummaryItems = items.filter(
+      (item) => item.studySummary || item.index === STATE.answeringIndex
+    );
+    const answerRows = visibleSummaryItems
       .map((item) => {
-        const answer = normalizeText(item.studySummary || "") || "未生成";
+        const answer = normalizeText(item.studySummary || "") || "生成中";
         const safeAnswer = escapeHtml(answer);
+        const retryButton =
+          item.studySummary && isRetryableAnswer(item.studySummary)
+            ? `<button class='ykt-retry-button' type='button' data-ykt-retry='${item.index}'${
+                STATE.retryingIndex === item.index ? " disabled" : ""
+              }>${
+                STATE.retryingIndex === item.index ? "重试中" : "重试本题"
+              }</button>`
+            : "";
         return [
           "<div class='ykt-answer-row'>",
           `<span class='ykt-answer-index'>${item.index}</span>`,
-          `<span class='ykt-answer-value ${getAnswerClass(answer)}'>${safeAnswer}</span>`,
+          "<span class='ykt-answer-right'>",
+          `<span class='ykt-answer-value ${getAnswerClass(answer, { pendingMuted: true })}'>${safeAnswer}</span>`,
+          retryButton,
+          "</span>",
           "</div>"
         ].join("");
       })
       .join("");
+    const summarySection = answerRows
+      ? [
+          "<section class='ykt-summary-card'>",
+          "<div class='ykt-section-title'>AI 答案汇总</div>",
+          `<div class='ykt-answer-grid'>${answerRows}</div>`,
+          "</section>"
+        ].join("")
+      : "";
 
     STATE.listNode.innerHTML = [
-      "<section class='ykt-summary-card'>",
-      "<div class='ykt-section-title'>AI 答案汇总</div>",
-      `<div class='ykt-answer-grid'>${answerRows}</div>`,
-      "</section>",
+      summarySection,
       "<div class='ykt-question-list'>",
       questionCards,
       "</div>"
@@ -681,47 +851,70 @@
     );
   }
 
+  async function requestAnswerForQuestion(item, options = {}) {
+    const enhanced = Boolean(options.enhanced);
+    const nextItem = { ...item };
+
+    if (enhanced) {
+      if (!nextItem.sourceBlock) {
+        throw new Error("找不到该题原始区域，无法增强采集");
+      }
+      nextItem.enhancedRetryCount = (nextItem.enhancedRetryCount || 0) + 1;
+      await hydrateQuestionImages(nextItem, nextItem.sourceBlock, {
+        enhanced: true
+      });
+    }
+
+    if (!nextItem.imageDataUrls?.length) {
+      return {
+        ...nextItem,
+        analysisRaw: "未获取到题图",
+        studySummary: "未获取到题图"
+      };
+    }
+
+    const response = await callAiApiWithRetry(nextItem);
+    const text = normalizeChoiceAnswer(cleanAiAnswer(extractAiText(response)));
+    return {
+      ...nextItem,
+      analysisRaw: text,
+      studySummary: text
+    };
+  }
+
   async function summarizeWithAi() {
     if (!STATE.data.length) {
       throw new Error("请先获取题图");
     }
 
+    STATE.answeringIndex = null;
     for (let i = 0; i < STATE.data.length; i += 1) {
       const item = STATE.data[i];
-      if (!item.imageDataUrls?.length) {
-        STATE.data = STATE.data.map((current) =>
-          current.index === item.index
-            ? {
-                ...current,
-                analysisRaw: "未获取到题图",
-                studySummary: "未获取到题图"
-              }
-            : current
-        );
-        renderResults();
-        continue;
-      }
+      STATE.answeringIndex = item.index;
+      renderResults();
 
       setStatus(
         `正在请求 AI 直接识图答题...（第 ${i + 1}/${STATE.data.length} 题）`
       );
-      const response = await callAiApiWithRetry(item);
-      const text = normalizeChoiceAnswer(
-        cleanAiAnswer(extractAiText(response))
-      );
+      let answeredItem = await requestAnswerForQuestion(item);
+
+      if (isRetryableAnswer(answeredItem.studySummary) && item.sourceBlock) {
+        setStatus(`第 ${item.index} 题未识别完整，正在增强采集后重试...`);
+        answeredItem = await requestAnswerForQuestion(answeredItem, {
+          enhanced: true
+        });
+      }
 
       STATE.data = STATE.data.map((current) =>
         current.index === item.index
-          ? {
-              ...current,
-              analysisRaw: text,
-              studySummary: text
-            }
+          ? answeredItem
           : current
       );
       renderResults();
     }
 
+    STATE.answeringIndex = null;
+    renderResults();
     setStatus("AI 答案生成已完成");
   }
 
@@ -737,6 +930,7 @@
         throw new Error("没有找到题目块，请先将页面滚动到底部以加载完整内容。");
       }
 
+      STATE.answeringIndex = null;
       STATE.data = [];
       renderResults();
       setStatus(`已发现 ${blocks.length} 道题，开始获取题图...`);
@@ -749,20 +943,7 @@
         CONFIG.imageFetchConcurrency,
         async (block, i) => {
           const question = buildQuestionPayload(block, i);
-          const questionImages = findQuestionImages(block);
-          question.imageDataUrls = [];
-          for (
-            let imageIndex = 0;
-            imageIndex < questionImages.length;
-            imageIndex += 1
-          ) {
-            setStatus(
-              `正在获取第 ${question.index} 题题图，第 ${imageIndex + 1}/${questionImages.length} 张...`
-            );
-            question.imageDataUrls.push(
-              await imageElementToDataUrl(questionImages[imageIndex])
-            );
-          }
+          await hydrateQuestionImages(question, block);
           question.studySummary = "";
           question.analysisRaw = "";
 
@@ -785,16 +966,65 @@
     }
   }
 
+  async function retryQuestion(index) {
+    if (STATE.workflowRunning) {
+      setStatus("正在处理当前任务，请稍等完成后再重试单题。");
+      return;
+    }
+
+    const item = STATE.data.find((current) => current?.index === index);
+    if (!item) {
+      setStatus(`未找到第 ${index} 题，无法重试。`);
+      return;
+    }
+
+    STATE.workflowRunning = true;
+    STATE.retryingIndex = index;
+    STATE.answeringIndex = index;
+    try {
+      renderResults();
+      setStatus(`正在增强采集第 ${index} 题并重新请求 AI...`);
+      const answeredItem = await requestAnswerForQuestion(item, {
+        enhanced: true
+      });
+      STATE.data = STATE.data.map((current) =>
+        current?.index === index ? answeredItem : current
+      );
+      renderResults();
+      setStatus(`第 ${index} 题重试完成`);
+    } catch (error) {
+      console.error(error);
+      setStatus(`第 ${index} 题重试失败：${String(error?.message || error)}`);
+    } finally {
+      STATE.retryingIndex = null;
+      STATE.answeringIndex = null;
+      STATE.workflowRunning = false;
+      renderResults();
+    }
+  }
+
   async function runVisionAnswerSummary() {
-    await collectQuestionImages();
-    await summarizeWithAi();
+    if (STATE.workflowRunning) {
+      setStatus("正在处理当前任务，请稍等完成后再重新开始。");
+      return;
+    }
+
+    STATE.workflowRunning = true;
+    try {
+      await collectQuestionImages();
+      await summarizeWithAi();
+    } finally {
+      STATE.workflowRunning = false;
+    }
   }
 
   function createButton(label, onClick) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "ykt-primary-button";
-    button.textContent = label;
+    const text = document.createElement("span");
+    text.textContent = label;
+    button.appendChild(text);
     button.addEventListener("click", async () => {
       try {
         await onClick();
@@ -850,21 +1080,35 @@
         --ykt-accent-strong: #19c37d;
         --ykt-warn: #f2a60d;
         --ykt-shadow: 0 22px 60px rgba(0, 0, 0, .42);
+        --ykt-radius-window: 28px;
+        --ykt-radius-panel: 22px;
+        --ykt-radius-card: 18px;
+        --ykt-radius-control: 15px;
+        --ykt-radius-small: 11px;
+        --ykt-font-sans: "Inter", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", ui-sans-serif, sans-serif;
+        --ykt-font-mono: "SFMono-Regular", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, ui-monospace, monospace;
         position: fixed;
         right: 20px;
         bottom: 20px;
         width: min(392px, calc(100vw - 24px));
         max-height: min(74vh, 680px);
         z-index: 999999;
+        display: flex;
+        flex-direction: column;
         color: var(--ykt-ink);
         background:
-          radial-gradient(circle at 100% 0%, rgba(16, 163, 127, .1), transparent 34%),
-          linear-gradient(180deg, rgba(35, 35, 35, .96), rgba(20, 20, 20, .94));
-        border: 1px solid var(--ykt-line);
-        border-radius: 18px;
-        box-shadow: var(--ykt-shadow);
+          radial-gradient(circle at 100% 0%, rgba(16, 163, 127, .12), transparent 34%),
+          linear-gradient(180deg, rgba(35, 35, 35, .9), rgba(20, 20, 20, .88));
+        border: 1px double rgba(255, 255, 255, .12);
+        border-radius: var(--ykt-radius-window);
+        box-shadow:
+          inset 2px -2px 1px -1px rgba(255, 255, 255, .18),
+          inset -2px 2px 1px -1px rgba(255, 255, 255, .1),
+          inset 0 0 1px rgba(255, 255, 255, .42),
+          inset 0 -22px 36px rgba(0, 0, 0, .24),
+          var(--ykt-shadow);
         overflow: hidden;
-        font-family: "Inter", "Noto Sans SC", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+        font-family: var(--ykt-font-sans);
         backdrop-filter: blur(12px) saturate(1.08);
         -webkit-backdrop-filter: blur(12px) saturate(1.08);
         isolation: isolate;
@@ -877,8 +1121,23 @@
         z-index: -1;
         border-radius: inherit;
         background:
-          linear-gradient(135deg, rgba(255, 255, 255, .08), rgba(255, 255, 255, .025) 38%, rgba(0, 0, 0, .12)),
-          radial-gradient(circle at 18% 8%, rgba(255, 255, 255, .06), transparent 28%);
+          linear-gradient(45deg, rgba(255, 255, 255, .16) 0%, rgba(255, 255, 255, .04) 24%, rgba(255, 255, 255, .02) 72%, rgba(255, 255, 255, .14) 100%),
+          radial-gradient(circle at 18% 8%, rgba(255, 255, 255, .09), transparent 26%),
+          radial-gradient(circle at 88% 12%, rgba(25, 195, 125, .1), transparent 28%);
+        pointer-events: none;
+      }
+
+      .ykt-study-panel::after {
+        content: "";
+        position: absolute;
+        z-index: -1;
+        inset: 10px;
+        border-radius: var(--ykt-radius-panel);
+        border: 1px solid rgba(255, 255, 255, .1);
+        box-shadow:
+          inset 0 1px rgba(255, 255, 255, .16),
+          inset 0 0 18px rgba(255, 255, 255, .035);
+        filter: blur(.2px);
         pointer-events: none;
       }
 
@@ -893,12 +1152,13 @@
 
       .ykt-header {
         display: flex;
+        flex: 0 0 auto;
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        padding: 14px 16px 12px;
-        border-bottom: 1px solid var(--ykt-line);
-        background: rgba(255, 255, 255, .04);
+        padding: 18px 18px 13px;
+        border-bottom: 0;
+        background: linear-gradient(180deg, rgba(255, 255, 255, .045), rgba(255, 255, 255, .012));
         cursor: grab;
         touch-action: none;
       }
@@ -907,10 +1167,52 @@
         cursor: grabbing;
       }
 
-      .ykt-title {
-        font-size: 15px;
-        font-weight: 760;
-        letter-spacing: .02em;
+      .ykt-window-controls {
+        display: inline-flex;
+        align-items: center;
+      }
+
+      .ykt-control-dot {
+        position: relative;
+        width: 20px;
+        height: 20px;
+        padding: 0;
+        border: 1px solid rgba(16, 163, 127, .26);
+        border-radius: 50%;
+        cursor: pointer;
+        background: rgba(16, 163, 127, .1);
+        box-shadow:
+          inset 0 1px rgba(255, 255, 255, .08),
+          0 5px 12px rgba(0, 0, 0, .16);
+        transition: transform .18s ease, filter .18s ease, box-shadow .18s ease;
+      }
+
+      .ykt-control-dot::after {
+        content: "";
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 8px;
+        height: 2px;
+        border-radius: 999px;
+        background: var(--ykt-accent-strong);
+        box-shadow: 0 0 8px rgba(25, 195, 125, .45);
+        transform: translate(-50%, -50%);
+      }
+
+      .ykt-control-dot:hover {
+        transform: translateY(-1px);
+        filter: saturate(1.08);
+        background: rgba(16, 163, 127, .16);
+        border-color: rgba(16, 163, 127, .38);
+        box-shadow:
+          inset 0 1px rgba(255, 255, 255, .1),
+          0 7px 16px rgba(0, 0, 0, .18);
+      }
+
+      .ykt-control-dot:focus-visible {
+        outline: 2px solid rgba(255, 255, 255, .32);
+        outline-offset: 3px;
       }
 
       .ykt-badge {
@@ -919,27 +1221,160 @@
         border-radius: 999px;
         color: var(--ykt-accent-strong);
         background: rgba(16, 163, 127, .1);
-        font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font: 700 10px/1 var(--ykt-font-mono);
         letter-spacing: .06em;
         text-transform: uppercase;
       }
 
+      .ykt-mini-orb {
+        position: fixed;
+        right: 22px;
+        bottom: 22px;
+        z-index: 999999;
+        width: 62px;
+        height: 62px;
+        padding: 0;
+        border: 0;
+        border-radius: 999px;
+        color: #19c37d;
+        appearance: none;
+        -webkit-appearance: none;
+        background:
+          radial-gradient(circle at 34% 22%, rgba(255, 255, 255, 1), rgba(255, 255, 255, .72) 18%, transparent 34%),
+          linear-gradient(145deg, #ffffff 0%, #f4f4f4 48%, #d8d8d8 100%);
+        box-shadow:
+          inset 0 4px 1px rgba(255, 255, 255, .88),
+          inset 0 -5px 2px rgba(120, 120, 120, .32),
+          inset -7px 8px 12px rgba(0, 0, 0, .08),
+          0 7px 1px #b9b9b9,
+          4px 10px 3px rgba(255, 255, 255, .62),
+          0 20px 30px rgba(0, 0, 0, .26);
+        cursor: pointer;
+        display: none;
+        place-items: center;
+        overflow: hidden;
+        isolation: isolate;
+        font: italic 900 15px/1 var(--ykt-font-mono);
+        letter-spacing: -.04em;
+        transition: transform .22s ease, box-shadow .22s ease, filter .22s ease;
+      }
+
+      .ykt-mini-orb::before {
+        content: "";
+        position: absolute;
+        z-index: 0;
+        inset: 7px;
+        border-radius: inherit;
+        background: linear-gradient(145deg, #ffffff, #dedede);
+        box-shadow:
+          inset 0 3px 0 rgba(255, 255, 255, .96),
+          inset 5px 10px 2px rgba(255, 255, 255, .32),
+          inset 0 -1px 1px rgba(110, 110, 110, .28),
+          0 0 18px rgba(255, 255, 255, .42);
+        backdrop-filter: blur(8px) saturate(1.2);
+        -webkit-backdrop-filter: blur(8px) saturate(1.2);
+      }
+
+      .ykt-mini-orb::after {
+        content: "";
+        position: absolute;
+        z-index: 1;
+        left: 17px;
+        top: 13px;
+        width: 20px;
+        height: 9px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, rgba(255, 255, 255, .95), rgba(255, 255, 255, .18));
+        filter: blur(1.2px);
+        transform: rotate(-18deg);
+      }
+
+      .ykt-orb-label {
+        position: relative;
+        z-index: 2;
+        color: #19c37d;
+        font: italic 900 15px/1 var(--ykt-font-mono);
+        letter-spacing: -.04em;
+        text-shadow:
+          0 1px 0 rgba(255, 255, 255, .72),
+          0 -1px 0 rgba(0, 0, 0, .42),
+          0 0 8px rgba(25, 195, 125, .62),
+          0 0 18px rgba(16, 163, 127, .36);
+        pointer-events: none;
+      }
+
+      .ykt-mini-orb:hover {
+        transform: translateY(5px);
+        filter: brightness(.99) contrast(1.04);
+        background:
+          radial-gradient(circle at 32% 20%, rgba(255, 255, 255, .92), rgba(255, 255, 255, .44) 18%, transparent 34%),
+          linear-gradient(145deg, #f7f7f7 0%, #e5e5e5 46%, #bfc0c2 100%);
+        box-shadow:
+          inset 0 4px 1px rgba(255, 255, 255, .82),
+          inset 0 -7px 3px rgba(112, 112, 112, .28),
+          inset -8px 9px 14px rgba(0, 0, 0, .1),
+          0 3px 1px #9f9f9f,
+          3px 7px 5px rgba(255, 255, 255, .42),
+          0 13px 24px rgba(0, 0, 0, .3);
+      }
+
+      .ykt-mini-orb:hover::before {
+        background: linear-gradient(145deg, #ffffff, #cfcfcf);
+        box-shadow:
+          inset 0 3px 0 rgba(255, 255, 255, .86),
+          inset 5px 10px 3px rgba(255, 255, 255, .24),
+          inset 0 -2px 2px rgba(92, 92, 92, .24),
+          0 0 12px rgba(255, 255, 255, .28);
+      }
+
+      .ykt-mini-orb:hover::after {
+        opacity: .72;
+      }
+
+      .ykt-mini-orb:active {
+        transform: translateY(12px) scale(.96);
+        background:
+          radial-gradient(circle at 36% 24%, rgba(255, 255, 255, .76), rgba(255, 255, 255, .3) 16%, transparent 32%),
+          linear-gradient(145deg, #e7e7e7 0%, #d1d1d1 50%, #aeb0b3 100%);
+        box-shadow:
+          inset 0 6px 2px rgba(255, 255, 255, .58),
+          inset 0 14px 8px rgba(120, 120, 120, .24),
+          inset 0 -4px 2px rgba(255, 255, 255, .2),
+          0 1px 1px #8f8f8f,
+          0 7px 14px rgba(0, 0, 0, .28);
+      }
+
       .ykt-body {
+        display: flex;
+        flex: 1 1 auto;
+        flex-direction: column;
+        min-height: 0;
+        max-height: calc(min(74vh, 680px) - 52px);
+        overflow: hidden;
         padding: 12px;
       }
 
       .ykt-status {
         min-height: 34px;
+        max-height: 78px;
+        flex: 0 0 auto;
         margin-bottom: 10px;
         padding: 8px 10px;
         border: 1px solid var(--ykt-line);
-        border-radius: 12px;
+        border-radius: var(--ykt-radius-control);
         color: var(--ykt-muted);
         background: rgba(0, 0, 0, .28);
-        font: 500 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, "Microsoft YaHei", monospace;
+        font: 500 12px/1.45 var(--ykt-font-sans);
+        overflow-y: auto;
+        overflow-x: hidden;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, .18) transparent;
       }
 
       .ykt-actions {
+        flex: 0 0 auto;
         display: flex;
         gap: 8px;
         flex-wrap: wrap;
@@ -947,21 +1382,72 @@
       }
 
       .ykt-primary-button {
-        border: 1px solid rgba(25, 195, 125, .28);
-        border-radius: 12px;
-        padding: 9px 12px;
-        color: #06140f;
-        background: linear-gradient(180deg, #19c37d, #10a37f);
-        box-shadow: 0 12px 24px rgba(16, 163, 127, .22), inset 0 1px rgba(255, 255, 255, .26);
+        position: relative;
+        overflow: hidden;
+        z-index: 0;
+        border: 1px solid rgba(16, 163, 127, .26);
+        border-radius: 999px;
+        padding: 10px 17px;
+        color: var(--ykt-accent-strong);
+        background:
+          radial-gradient(circle at 24% 18%, rgba(255, 255, 255, .08), transparent 32%),
+          rgba(16, 163, 127, .1);
+        box-shadow:
+          inset 0 1px rgba(255, 255, 255, .08),
+          0 8px 18px rgba(0, 0, 0, .18);
         cursor: pointer;
-        font: 760 12px/1 "Inter", "Noto Sans SC", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
-        transition: transform .16s ease, box-shadow .16s ease, filter .16s ease;
+        font: 800 12px/1 var(--ykt-font-sans);
+        letter-spacing: .02em;
+        transition: transform .22s ease, box-shadow .22s ease, border-color .22s ease, background .22s ease;
       }
 
       .ykt-primary-button:hover {
         transform: translateY(-1px);
-        filter: saturate(1.04);
-        box-shadow: 0 16px 30px rgba(16, 163, 127, .28), inset 0 1px rgba(255, 255, 255, .32);
+        border-color: rgba(16, 163, 127, .42);
+        background:
+          radial-gradient(circle at 24% 18%, rgba(255, 255, 255, .11), transparent 32%),
+          rgba(16, 163, 127, .15);
+        box-shadow:
+          inset 0 1px rgba(255, 255, 255, .1),
+          0 10px 22px rgba(0, 0, 0, .2),
+          0 0 24px rgba(16, 163, 127, .08);
+      }
+
+      .ykt-primary-button::after {
+        content: "";
+        position: absolute;
+        z-index: 1;
+        left: 0;
+        bottom: 0;
+        width: 180px;
+        height: 180px;
+        border-radius: 999px;
+        background:
+          radial-gradient(circle at 34% 28%, rgba(255, 255, 255, .96), rgba(255, 255, 255, .48) 22%, transparent 42%),
+          linear-gradient(145deg, rgba(255, 255, 255, .92), rgba(232, 232, 232, .72) 58%, rgba(196, 198, 201, .58));
+        box-shadow:
+          inset 0 3px 0 rgba(255, 255, 255, .72),
+          inset 0 -6px 3px rgba(130, 130, 130, .16);
+        transform: translate(-105%, 55%);
+        transition: transform .34s ease, border-radius .34s ease;
+        pointer-events: none;
+      }
+
+      .ykt-primary-button span {
+        position: relative;
+        z-index: 2;
+        color: var(--ykt-accent-strong);
+        text-shadow: 0 0 10px rgba(25, 195, 125, .16);
+      }
+
+      .ykt-primary-button:hover span {
+        color: #06140f;
+        text-shadow: 0 1px 0 rgba(255, 255, 255, .45);
+      }
+
+      .ykt-primary-button:hover::after {
+        border-radius: 0;
+        transform: translate(0, 0);
       }
 
       .ykt-primary-button:active {
@@ -974,6 +1460,7 @@
       }
 
       .ykt-tips {
+        flex: 0 0 auto;
         margin-bottom: 12px;
         color: var(--ykt-muted);
         font-size: 12px;
@@ -982,45 +1469,56 @@
 
       .ykt-results {
         display: flex;
+        flex: 1 1 auto;
         flex-direction: column;
         gap: 12px;
-        max-height: 44vh;
-        overflow: auto;
-        padding-right: 2px;
+        min-height: 0;
+        max-height: none;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding-right: 6px;
+        padding-bottom: 8px;
         font-size: 12px;
         line-height: 1.5;
         scrollbar-width: thin;
         scrollbar-color: rgba(255, 255, 255, .22) transparent;
+        contain: layout paint;
       }
 
       .ykt-empty {
         padding: 14px;
         border: 1px dashed rgba(255, 255, 255, .16);
-        border-radius: 14px;
+        border-radius: var(--ykt-radius-card);
         color: var(--ykt-muted);
         background: rgba(255, 255, 255, .055);
       }
 
       .ykt-summary-card {
         flex: 0 0 auto;
-        padding: 10px;
-        border: 1px solid rgba(255, 255, 255, .1);
-        border-radius: 14px;
-        background: #262626;
-        box-shadow: 0 12px 26px rgba(0, 0, 0, .22);
+        padding: 10px 8px;
+        border: 1px solid rgba(255, 255, 255, .075);
+        border-radius: var(--ykt-radius-card);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, .035), rgba(255, 255, 255, .015)),
+          rgba(24, 24, 24, .72);
+        box-shadow:
+          inset 0 1px rgba(255, 255, 255, .055),
+          0 10px 22px rgba(0, 0, 0, .14);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
       }
 
       .ykt-section-title {
         margin-bottom: 8px;
         color: var(--ykt-accent-strong);
-        font: 800 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font: 800 11px/1 var(--ykt-font-sans);
         letter-spacing: .08em;
       }
 
       .ykt-answer-grid {
         display: grid;
         grid-template-columns: 1fr;
-        gap: 6px;
+        gap: 7px;
       }
 
       .ykt-answer-row {
@@ -1029,22 +1527,52 @@
         justify-content: space-between;
         gap: 8px;
         min-width: 0;
-        padding: 6px 7px;
-        border: 1px solid rgba(255, 255, 255, .08);
-        border-radius: 10px;
-        background: #303030;
+        padding: 8px 11px;
+        border: 1px solid rgba(16, 163, 127, .11);
+        border-radius: 999px;
+        background:
+          radial-gradient(circle at 14% 18%, rgba(255, 255, 255, .07), transparent 32%),
+          linear-gradient(180deg, rgba(255, 255, 255, .055), rgba(255, 255, 255, .025)),
+          rgba(29, 29, 29, .68);
+        box-shadow:
+          inset 0 1px rgba(255, 255, 255, .075),
+          inset 0 -1px rgba(0, 0, 0, .14),
+          0 6px 14px rgba(0, 0, 0, .12);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        animation: ykt-row-enter .28s ease both;
+      }
+
+      @keyframes ykt-row-enter {
+        from {
+          opacity: 0;
+          transform: translateY(8px) scale(.985);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
       }
 
       .ykt-answer-index {
-        color: var(--ykt-muted);
-        font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        color: rgba(25, 195, 125, .92);
+        font: 800 11px/1 var(--ykt-font-mono);
+        text-shadow: 0 0 10px rgba(25, 195, 125, .16);
+      }
+
+      .ykt-answer-right {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        min-width: 0;
       }
 
       .ykt-answer-value {
         min-width: 34px;
         overflow: hidden;
         color: var(--ykt-ink);
-        font: 800 12px/1.15 ui-monospace, SFMono-Regular, Menlo, Consolas, "Microsoft YaHei", monospace;
+        font: 800 12px/1.15 var(--ykt-font-sans);
         text-align: right;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -1052,12 +1580,44 @@
 
       .ykt-answer-value.is-ready,
       .ykt-meta-row strong.is-ready {
-        color: var(--ykt-good);
+        color: rgba(25, 195, 125, .92);
       }
 
       .ykt-answer-value.is-muted,
       .ykt-meta-row strong.is-muted {
         color: var(--ykt-warn);
+      }
+
+      .ykt-retry-button {
+        border: 1px solid rgba(242, 166, 13, .24);
+        border-radius: 999px;
+        padding: 5px 8px;
+        color: var(--ykt-warn);
+        background: rgba(242, 166, 13, .08);
+        box-shadow:
+          inset 0 1px rgba(255, 255, 255, .06),
+          0 6px 14px rgba(0, 0, 0, .12);
+        cursor: pointer;
+        font: 800 10px/1 var(--ykt-font-sans);
+        white-space: nowrap;
+        transition: transform .18s ease, border-color .18s ease, background .18s ease;
+      }
+
+      .ykt-retry-button:hover {
+        transform: translateY(-1px);
+        border-color: rgba(242, 166, 13, .42);
+        background: rgba(242, 166, 13, .13);
+      }
+
+      .ykt-retry-button:disabled {
+        cursor: wait;
+        opacity: .72;
+        transform: none;
+      }
+
+      .ykt-retry-button:focus-visible {
+        outline: 2px solid rgba(242, 166, 13, .42);
+        outline-offset: 2px;
       }
 
       .ykt-question-list {
@@ -1068,10 +1628,22 @@
       }
 
       .ykt-question-card {
-        padding: 10px;
-        border: 1px solid rgba(255, 255, 255, .08);
-        border-radius: 14px;
-        background: #1f1f1f;
+        padding: 12px;
+        border: 1px solid rgba(16, 163, 127, .13);
+        border-radius: var(--ykt-radius-card);
+        background:
+          radial-gradient(circle at 100% 0%, rgba(16, 163, 127, .025), transparent 38%),
+          linear-gradient(145deg, rgba(255, 255, 255, .045), rgba(255, 255, 255, .018) 42%, rgba(0, 0, 0, .14)),
+          rgba(18, 18, 18, .96);
+        box-shadow:
+          inset 0 1px rgba(255, 255, 255, .08),
+          inset 0 0 18px rgba(255, 255, 255, .018),
+          0 10px 24px rgba(0, 0, 0, .18),
+          0 0 20px rgba(16, 163, 127, .025);
+        backdrop-filter: blur(10px) saturate(1.08);
+        -webkit-backdrop-filter: blur(10px) saturate(1.08);
+        overflow: hidden;
+        contain: paint;
       }
 
       .ykt-question-head,
@@ -1080,6 +1652,12 @@
         align-items: center;
         justify-content: space-between;
         gap: 10px;
+        min-width: 0;
+      }
+
+      .ykt-question-head > span,
+      .ykt-meta-row > span {
+        min-width: 0;
       }
 
       .ykt-question-head {
@@ -1088,36 +1666,48 @@
       }
 
       .ykt-type {
-        color: var(--ykt-muted);
+        color: rgba(236, 236, 236, .76);
         font-size: 11px;
         font-weight: 600;
       }
 
       .ykt-meta-row {
         color: var(--ykt-muted);
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Microsoft YaHei", monospace;
+        font-family: var(--ykt-font-sans);
         font-size: 11px;
       }
 
       .ykt-meta-row strong {
+        flex: 0 0 auto;
         color: var(--ykt-ink);
         font-size: 12px;
       }
 
       .ykt-thumb-row {
         display: flex;
+        flex-wrap: nowrap;
         gap: 6px;
         margin-top: 8px;
         overflow: hidden;
+        max-width: 100%;
       }
 
       .ykt-thumb {
-        width: 54px;
-        height: 42px;
+        display: block;
+        flex: 0 0 54px;
+        width: 54px !important;
+        height: 42px !important;
+        min-width: 54px;
+        max-width: 54px !important;
+        min-height: 42px;
+        max-height: 42px !important;
         object-fit: cover;
-        border: 1px solid rgba(255, 255, 255, .1);
-        border-radius: 9px;
-        background: rgba(255, 255, 255, .05);
+        border: 1px solid rgba(255, 255, 255, .16);
+        border-radius: var(--ykt-radius-small);
+        background: rgba(255, 255, 255, .08);
+        box-shadow:
+          inset 0 1px rgba(255, 255, 255, .14),
+          0 6px 14px rgba(0, 0, 0, .18);
       }
 
       .ykt-thumb-more {
@@ -1126,16 +1716,26 @@
         justify-content: center;
         width: 42px;
         height: 42px;
-        border: 1px solid rgba(255, 255, 255, .1);
-        border-radius: 9px;
+        border: 1px solid rgba(16, 163, 127, .14);
+        border-radius: var(--ykt-radius-small);
         color: var(--ykt-muted);
-        background: rgba(255, 255, 255, .05);
-        font: 800 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        background:
+          radial-gradient(circle at 30% 20%, rgba(255, 255, 255, .08), transparent 38%),
+          rgba(255, 255, 255, .045);
+        box-shadow:
+          inset 0 1px rgba(255, 255, 255, .08),
+          0 6px 14px rgba(0, 0, 0, .14);
+        font: 800 11px/1 var(--ykt-font-mono);
       }
 
       @media (max-width: 520px) {
         .ykt-study-panel {
           width: calc(100vw - 24px);
+          max-height: min(78vh, 680px);
+        }
+
+        .ykt-body {
+          max-height: calc(min(78vh, 680px) - 52px);
         }
 
       }
@@ -1202,6 +1802,9 @@
       if (event.button !== 0) {
         return;
       }
+      if (event.target.closest("button")) {
+        return;
+      }
 
       const rect = panel.getBoundingClientRect();
       STATE.drag = {
@@ -1243,10 +1846,40 @@
     handle.addEventListener("pointerup", finishDrag);
     handle.addEventListener("pointercancel", finishDrag);
     window.addEventListener("resize", () => {
+      if (panel.style.display === "none") {
+        return;
+      }
       const rect = panel.getBoundingClientRect();
       applyPanelPosition(panel, { left: rect.left, top: rect.top });
       savePanelPosition(panel);
     });
+  }
+
+  function setPanelMinimized(minimized) {
+    if (!STATE.panel || !STATE.orbNode) {
+      return;
+    }
+
+    STATE.panel.style.display = minimized ? "none" : "";
+    STATE.orbNode.style.display = minimized ? "grid" : "none";
+    if (!minimized) {
+      const rect = STATE.panel.getBoundingClientRect();
+      applyPanelPosition(STATE.panel, { left: rect.left, top: rect.top });
+    }
+  }
+
+  function createMiniOrb() {
+    const orb = document.createElement("button");
+    orb.type = "button";
+    orb.className = "ykt-mini-orb";
+    orb.title = "恢复学习整理助手";
+    orb.setAttribute("aria-label", "恢复学习整理助手");
+    const label = document.createElement("span");
+    label.className = "ykt-orb-label";
+    label.textContent = "ON";
+    orb.appendChild(label);
+    orb.addEventListener("click", () => setPanelMinimized(false));
+    return orb;
   }
 
   function buildPanel() {
@@ -1259,15 +1892,22 @@
     const header = document.createElement("div");
     header.className = "ykt-header";
 
-    const title = document.createElement("div");
-    title.className = "ykt-title";
-    title.textContent = "学习整理助手";
+    const controls = document.createElement("div");
+    controls.className = "ykt-window-controls";
+
+    const minimizeButton = document.createElement("button");
+    minimizeButton.type = "button";
+    minimizeButton.className = "ykt-control-dot";
+    minimizeButton.title = "最小化";
+    minimizeButton.setAttribute("aria-label", "最小化学习整理助手");
+    minimizeButton.addEventListener("click", () => setPanelMinimized(true));
 
     const badge = document.createElement("div");
     badge.className = "ykt-badge";
     badge.textContent = "Vision";
 
-    header.appendChild(title);
+    controls.appendChild(minimizeButton);
+    header.appendChild(controls);
     header.appendChild(badge);
 
     const body = document.createElement("div");
@@ -1291,6 +1931,19 @@
 
     const list = document.createElement("div");
     list.className = "ykt-results";
+    list.addEventListener("click", (event) => {
+      if (!(event.target instanceof Element)) {
+        return;
+      }
+      const button = event.target.closest("[data-ykt-retry]");
+      if (!button) {
+        return;
+      }
+      const index = Number(button.getAttribute("data-ykt-retry"));
+      if (Number.isFinite(index)) {
+        retryQuestion(index);
+      }
+    });
 
     body.appendChild(status);
     body.appendChild(actions);
@@ -1300,10 +1953,12 @@
     panel.appendChild(body);
 
     STATE.panel = panel;
+    STATE.orbNode = createMiniOrb();
     STATE.statusNode = status;
     STATE.listNode = list;
     renderResults();
     document.body.appendChild(panel);
+    document.body.appendChild(STATE.orbNode);
     restorePanelPosition(panel);
     bindPanelDrag(panel, header);
   }
@@ -1328,7 +1983,9 @@
       state: STATE,
       collectQuestionImages,
       summarizeWithAi,
-      runVisionAnswerSummary
+      runVisionAnswerSummary,
+      retryQuestion,
+      setPanelMinimized
     };
   }
 
