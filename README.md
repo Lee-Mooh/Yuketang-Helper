@@ -29,6 +29,11 @@ const content = [
     ];
 
 ```
+> 你也可以在`@match`中更改指定的`url`,只要答题页是以图片形式呈现
+```js
+//line 6
+ @match        https://changjiang-exam.yuketang.cn/*
+```
 
 ## 功能
 
