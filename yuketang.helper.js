@@ -43,7 +43,8 @@
     data: [],
     panel: null,
     statusNode: null,
-    listNode: null
+    listNode: null,
+    drag: null
   };
 
   const SELECTORS = {
@@ -60,6 +61,8 @@
   };
 
   const PANEL_STYLE_ID = "ykt-study-helper-styles";
+  const PANEL_FONT_ID = "ykt-study-helper-fonts";
+  const PANEL_POSITION_KEY = "ykt-study-helper-panel-position";
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -803,6 +806,31 @@
     return button;
   }
 
+  function injectPanelFonts() {
+    if (document.getElementById(PANEL_FONT_ID)) {
+      return;
+    }
+
+    const preconnectGoogle = document.createElement("link");
+    preconnectGoogle.id = PANEL_FONT_ID;
+    preconnectGoogle.rel = "preconnect";
+    preconnectGoogle.href = "https://fonts.googleapis.com";
+
+    const preconnectGstatic = document.createElement("link");
+    preconnectGstatic.rel = "preconnect";
+    preconnectGstatic.href = "https://fonts.gstatic.com";
+    preconnectGstatic.crossOrigin = "anonymous";
+
+    const fontLink = document.createElement("link");
+    fontLink.rel = "stylesheet";
+    fontLink.href =
+      "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700;800&display=swap";
+
+    document.head.appendChild(preconnectGoogle);
+    document.head.appendChild(preconnectGstatic);
+    document.head.appendChild(fontLink);
+  }
+
   function injectPanelStyles() {
     if (document.getElementById(PANEL_STYLE_ID)) {
       return;
@@ -830,18 +858,37 @@
         z-index: 999999;
         color: var(--ykt-ink);
         background:
-          radial-gradient(circle at 100% 0%, rgba(16, 163, 127, .18), transparent 32%),
-          linear-gradient(180deg, #212121, #171717);
+          radial-gradient(circle at 100% 0%, rgba(16, 163, 127, .1), transparent 34%),
+          linear-gradient(180deg, rgba(35, 35, 35, .96), rgba(20, 20, 20, .94));
         border: 1px solid var(--ykt-line);
         border-radius: 18px;
         box-shadow: var(--ykt-shadow);
         overflow: hidden;
-        font-family: "Anthropic Sans", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
-        backdrop-filter: blur(18px);
+        font-family: "Inter", "Noto Sans SC", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+        backdrop-filter: blur(12px) saturate(1.08);
+        -webkit-backdrop-filter: blur(12px) saturate(1.08);
+        isolation: isolate;
+      }
+
+      .ykt-study-panel::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        z-index: -1;
+        border-radius: inherit;
+        background:
+          linear-gradient(135deg, rgba(255, 255, 255, .08), rgba(255, 255, 255, .025) 38%, rgba(0, 0, 0, .12)),
+          radial-gradient(circle at 18% 8%, rgba(255, 255, 255, .06), transparent 28%);
+        pointer-events: none;
       }
 
       .ykt-study-panel * {
         box-sizing: border-box;
+      }
+
+      .ykt-study-panel.is-dragging {
+        user-select: none;
+        box-shadow: 0 28px 72px rgba(0, 0, 0, .54);
       }
 
       .ykt-header {
@@ -851,7 +898,13 @@
         gap: 12px;
         padding: 14px 16px 12px;
         border-bottom: 1px solid var(--ykt-line);
-        background: rgba(255, 255, 255, .025);
+        background: rgba(255, 255, 255, .04);
+        cursor: grab;
+        touch-action: none;
+      }
+
+      .ykt-study-panel.is-dragging .ykt-header {
+        cursor: grabbing;
       }
 
       .ykt-title {
@@ -882,7 +935,7 @@
         border: 1px solid var(--ykt-line);
         border-radius: 12px;
         color: var(--ykt-muted);
-        background: rgba(0, 0, 0, .18);
+        background: rgba(0, 0, 0, .28);
         font: 500 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, "Microsoft YaHei", monospace;
       }
 
@@ -901,7 +954,7 @@
         background: linear-gradient(180deg, #19c37d, #10a37f);
         box-shadow: 0 12px 24px rgba(16, 163, 127, .22), inset 0 1px rgba(255, 255, 255, .26);
         cursor: pointer;
-        font: 760 12px/1 "Anthropic Sans", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+        font: 760 12px/1 "Inter", "Noto Sans SC", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
         transition: transform .16s ease, box-shadow .16s ease, filter .16s ease;
       }
 
@@ -945,7 +998,7 @@
         border: 1px dashed rgba(255, 255, 255, .16);
         border-radius: 14px;
         color: var(--ykt-muted);
-        background: rgba(255, 255, 255, .04);
+        background: rgba(255, 255, 255, .055);
       }
 
       .ykt-summary-card {
@@ -1082,8 +1135,7 @@
 
       @media (max-width: 520px) {
         .ykt-study-panel {
-          right: 12px;
-          bottom: 12px;
+          width: calc(100vw - 24px);
         }
 
       }
@@ -1101,7 +1153,104 @@
     document.head.appendChild(style);
   }
 
+  function clampPanelPosition(left, top, panel) {
+    const rect = panel.getBoundingClientRect();
+    const margin = 8;
+    const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+    const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+
+    return {
+      left: Math.min(Math.max(margin, left), maxLeft),
+      top: Math.min(Math.max(margin, top), maxTop)
+    };
+  }
+
+  function savePanelPosition(panel) {
+    const rect = panel.getBoundingClientRect();
+    localStorage.setItem(
+      PANEL_POSITION_KEY,
+      JSON.stringify({
+        left: Math.round(rect.left),
+        top: Math.round(rect.top)
+      })
+    );
+  }
+
+  function applyPanelPosition(panel, position) {
+    const next = clampPanelPosition(position.left, position.top, panel);
+    panel.style.left = `${next.left}px`;
+    panel.style.top = `${next.top}px`;
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+  }
+
+  function restorePanelPosition(panel) {
+    try {
+      const stored = JSON.parse(
+        localStorage.getItem(PANEL_POSITION_KEY) || "null"
+      );
+      if (Number.isFinite(stored?.left) && Number.isFinite(stored?.top)) {
+        applyPanelPosition(panel, stored);
+      }
+    } catch (error) {
+      console.warn("[study-helper] restore panel position failed", error);
+    }
+  }
+
+  function bindPanelDrag(panel, handle) {
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) {
+        return;
+      }
+
+      const rect = panel.getBoundingClientRect();
+      STATE.drag = {
+        pointerId: event.pointerId,
+        offsetX: event.clientX - rect.left,
+        offsetY: event.clientY - rect.top
+      };
+
+      panel.classList.add("is-dragging");
+      handle.setPointerCapture(event.pointerId);
+      applyPanelPosition(panel, { left: rect.left, top: rect.top });
+      event.preventDefault();
+    });
+
+    handle.addEventListener("pointermove", (event) => {
+      if (!STATE.drag || STATE.drag.pointerId !== event.pointerId) {
+        return;
+      }
+
+      applyPanelPosition(panel, {
+        left: event.clientX - STATE.drag.offsetX,
+        top: event.clientY - STATE.drag.offsetY
+      });
+    });
+
+    function finishDrag(event) {
+      if (!STATE.drag || STATE.drag.pointerId !== event.pointerId) {
+        return;
+      }
+
+      STATE.drag = null;
+      panel.classList.remove("is-dragging");
+      savePanelPosition(panel);
+      if (handle.hasPointerCapture(event.pointerId)) {
+        handle.releasePointerCapture(event.pointerId);
+      }
+    }
+
+    handle.addEventListener("pointerup", finishDrag);
+    handle.addEventListener("pointercancel", finishDrag);
+    window.addEventListener("resize", () => {
+      const rect = panel.getBoundingClientRect();
+      applyPanelPosition(panel, { left: rect.left, top: rect.top });
+      savePanelPosition(panel);
+    });
+  }
+
   function buildPanel() {
+    injectPanelFonts();
     injectPanelStyles();
 
     const panel = document.createElement("div");
@@ -1155,6 +1304,8 @@
     STATE.listNode = list;
     renderResults();
     document.body.appendChild(panel);
+    restorePanelPosition(panel);
+    bindPanelDrag(panel, header);
   }
 
   function waitForPageStable() {
