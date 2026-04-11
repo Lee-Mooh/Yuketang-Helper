@@ -3,7 +3,7 @@
 // @namespace    codex.ykt.study
 // @version      0.1.0
 // @description  收集雨课堂结果页题图，并让多模态 AI 直接识图答题。
-// @match        https://changjiang-exam.yuketang.cn/result/*
+// @match        https://changjiang-exam.yuketang.cn
 // @grant        GM_xmlhttpRequest
 // @connect      *
 // @run-at       document-idle

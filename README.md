@@ -22,7 +22,7 @@
 4. 打开雨课堂结果页：
 
 ```text
-https://changjiang-exam.yuketang.cn/result/*
+https://changjiang-exam.yuketang.cn
 ```
 
 5. 先把页面滚动到底部，确保 20 道题都已经加载出来。
