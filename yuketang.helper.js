@@ -49,6 +49,7 @@
     listNode: null,
     answeringIndex: null,
     retryingIndex: null,
+    renderedQuestionIndexes: new Set(),
     workflowRunning: false,
     drag: null
   };
@@ -220,7 +221,10 @@
         imageCount <= CONFIG.maxEnhancedImagesPerQuestion * 2 &&
         markerCount <= 2;
 
-      if (isReasonableScope && imageCount >= best.querySelectorAll("img").length) {
+      if (
+        isReasonableScope &&
+        imageCount >= best.querySelectorAll("img").length
+      ) {
         best = current;
       }
 
@@ -243,9 +247,12 @@
   function dedupeImageElements(images) {
     const seen = new Set();
     return images.filter((img) => {
-      const src = img.currentSrc || img.src || img.getAttribute("data-src") || "";
+      const src =
+        img.currentSrc || img.src || img.getAttribute("data-src") || "";
       const rect = img.getBoundingClientRect();
-      const key = src || `${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}`;
+      const key =
+        src ||
+        `${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}`;
       if (seen.has(key)) {
         return false;
       }
@@ -258,12 +265,18 @@
     const expandedBlock = findExpandedQuestionBlock(block);
     const baseImages = Array.from(expandedBlock.querySelectorAll("img"));
     const blockRect = expandedBlock.getBoundingClientRect();
-    const nearbyImages = Array.from(document.querySelectorAll("img")).filter((img) => {
-      if (isInsideHelperUi(img) || !isLikelyQuestionImage(img)) {
-        return false;
+    const nearbyImages = Array.from(document.querySelectorAll("img")).filter(
+      (img) => {
+        if (isInsideHelperUi(img) || !isLikelyQuestionImage(img)) {
+          return false;
+        }
+        return rectsNear(
+          blockRect,
+          img.getBoundingClientRect(),
+          CONFIG.enhancedSearchPadding
+        );
       }
-      return rectsNear(blockRect, img.getBoundingClientRect(), CONFIG.enhancedSearchPadding);
-    });
+    );
 
     return dedupeImageElements([...baseImages, ...nearbyImages])
       .filter((img) => !isInsideHelperUi(img))
@@ -483,7 +496,11 @@
     );
     question.imageDataUrls = [];
 
-    for (let imageIndex = 0; imageIndex < questionImages.length; imageIndex += 1) {
+    for (
+      let imageIndex = 0;
+      imageIndex < questionImages.length;
+      imageIndex += 1
+    ) {
       setStatus(
         `${enhanced ? "增强获取" : "正在获取"}第 ${question.index} 题题图，第 ${imageIndex + 1}/${questionImages.length} 张...`
       );
@@ -551,12 +568,13 @@
 
     if (!items.length) {
       STATE.listNode.innerHTML =
-        "<div class='ykt-empty'>暂无题图结果。先滚动到底部，再开始识图。</div>";
+        "<div class='ykt-empty'><span>暂无题图结果。先滚动到底部，再开始识图。</span></div>";
       return;
     }
 
     const questionCards = items
       .map((item) => {
+        const shouldAnimate = !STATE.renderedQuestionIndexes.has(item.index);
         const detailPreview = escapeHtml(
           `已获取题图：${item.imageDataUrls?.length || 0} 张${
             item.enhancedRetryCount ? " · 已增强采集" : ""
@@ -564,7 +582,10 @@
         );
         const summaryPreview = escapeHtml(item.studySummary || "");
         return [
-          "<article class='ykt-question-card'>",
+          `<article class='ykt-question-card${shouldAnimate ? " is-entering" : ""}' style='--ykt-card-order: ${Math.min(
+            item.index,
+            10
+          )};'>`,
           "<div class='ykt-question-head'>",
           `<span>第 ${item.index} 题</span>`,
           item.type
@@ -580,6 +601,7 @@
         ].join("");
       })
       .join("");
+    items.forEach((item) => STATE.renderedQuestionIndexes.add(item.index));
 
     const visibleSummaryItems = items.filter(
       (item) => item.studySummary || item.index === STATE.answeringIndex
@@ -882,6 +904,17 @@
     };
   }
 
+  async function animateEmptyExit() {
+    const empty = STATE.listNode?.querySelector(".ykt-empty");
+    if (!empty) {
+      return;
+    }
+
+    empty.classList.remove("is-hovering");
+    empty.classList.add("is-launching");
+    await sleep(1180);
+  }
+
   async function summarizeWithAi() {
     if (!STATE.data.length) {
       throw new Error("请先获取题图");
@@ -906,9 +939,7 @@
       }
 
       STATE.data = STATE.data.map((current) =>
-        current.index === item.index
-          ? answeredItem
-          : current
+        current.index === item.index ? answeredItem : current
       );
       renderResults();
     }
@@ -931,9 +962,11 @@
       }
 
       STATE.answeringIndex = null;
+      STATE.renderedQuestionIndexes.clear();
       STATE.data = [];
       renderResults();
       setStatus(`已发现 ${blocks.length} 道题，开始获取题图...`);
+      await animateEmptyExit();
 
       STATE.data = new Array(blocks.length);
       let completed = 0;
@@ -1097,8 +1130,8 @@
         flex-direction: column;
         color: var(--ykt-ink);
         background:
-          radial-gradient(circle at 100% 0%, rgba(16, 163, 127, .12), transparent 34%),
-          linear-gradient(180deg, rgba(35, 35, 35, .9), rgba(20, 20, 20, .88));
+          radial-gradient(circle at 100% 0%, rgba(16, 163, 127, .1), transparent 34%),
+          linear-gradient(180deg, rgba(42, 42, 42, .98), rgba(19, 19, 19, .97));
         border: 1px double rgba(255, 255, 255, .12);
         border-radius: var(--ykt-radius-window);
         box-shadow:
@@ -1109,8 +1142,8 @@
           var(--ykt-shadow);
         overflow: hidden;
         font-family: var(--ykt-font-sans);
-        backdrop-filter: blur(12px) saturate(1.08);
-        -webkit-backdrop-filter: blur(12px) saturate(1.08);
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
         isolation: isolate;
       }
 
@@ -1122,9 +1155,15 @@
         border-radius: inherit;
         background:
           linear-gradient(45deg, rgba(255, 255, 255, .16) 0%, rgba(255, 255, 255, .04) 24%, rgba(255, 255, 255, .02) 72%, rgba(255, 255, 255, .14) 100%),
-          radial-gradient(circle at 18% 8%, rgba(255, 255, 255, .09), transparent 26%),
-          radial-gradient(circle at 88% 12%, rgba(25, 195, 125, .1), transparent 28%);
+          linear-gradient(90deg, rgba(255, 255, 255, .028), transparent 18%, transparent 82%, rgba(255, 255, 255, .035)),
+          radial-gradient(circle at 18% 8%, rgba(255, 255, 255, .08), transparent 26%),
+          radial-gradient(circle at 88% 12%, rgba(25, 195, 125, .09), transparent 28%);
         pointer-events: none;
+      }
+
+      .ykt-study-panel > * {
+        position: relative;
+        z-index: 1;
       }
 
       .ykt-study-panel::after {
@@ -1373,6 +1412,31 @@
         scrollbar-color: rgba(255, 255, 255, .18) transparent;
       }
 
+      .ykt-status::-webkit-scrollbar,
+      .ykt-results::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+
+      .ykt-status::-webkit-scrollbar-track,
+      .ykt-results::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .ykt-status::-webkit-scrollbar-thumb,
+      .ykt-results::-webkit-scrollbar-thumb {
+        border: 2px solid transparent;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, .18);
+        background-clip: content-box;
+      }
+
+      .ykt-status::-webkit-scrollbar-thumb:hover,
+      .ykt-results::-webkit-scrollbar-thumb:hover {
+        background: rgba(25, 195, 125, .3);
+        background-clip: content-box;
+      }
+
       .ykt-actions {
         flex: 0 0 auto;
         display: flex;
@@ -1482,15 +1546,164 @@
         line-height: 1.5;
         scrollbar-width: thin;
         scrollbar-color: rgba(255, 255, 255, .22) transparent;
-        contain: layout paint;
+        scrollbar-gutter: stable;
+        contain: layout;
       }
 
       .ykt-empty {
-        padding: 14px;
+        --ykt-empty-x: 50%;
+        --ykt-empty-y: 50%;
+        --ykt-empty-rx: 0deg;
+        --ykt-empty-ry: 0deg;
+        align-self: center;
+        position: relative;
+        width: fit-content;
+        max-width: calc(100% - 12px);
+        margin: 2px auto 4px;
+        padding: 10px 12px;
         border: 1px dashed rgba(255, 255, 255, .16);
-        border-radius: var(--ykt-radius-card);
+        border-radius: 999px;
         color: var(--ykt-muted);
-        background: rgba(255, 255, 255, .055);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, .045), rgba(255, 255, 255, .018)),
+          rgba(255, 255, 255, .042);
+        box-shadow:
+          inset 0 1px rgba(255, 255, 255, .06),
+          0 8px 18px rgba(0, 0, 0, .1);
+        overflow: hidden;
+        text-align: center;
+        transform: perspective(720px) rotateX(var(--ykt-empty-rx)) rotateY(var(--ykt-empty-ry));
+        transform-style: preserve-3d;
+        transition:
+          transform .28s ease,
+          border-color .28s ease,
+          box-shadow .28s ease,
+          background .28s ease;
+        white-space: normal;
+      }
+
+      .ykt-empty::before {
+        content: "";
+        position: absolute;
+        inset: -45%;
+        background:
+          radial-gradient(circle at var(--ykt-empty-x) var(--ykt-empty-y), rgba(25, 195, 125, .22), transparent 28%),
+          conic-gradient(from 160deg, transparent, rgba(255, 255, 255, .12), transparent 32%);
+        opacity: 0;
+        filter: blur(18px);
+        pointer-events: none;
+        transition: opacity .28s ease;
+      }
+
+      .ykt-empty::after {
+        content: "";
+        position: absolute;
+        inset: 1px;
+        border-radius: inherit;
+        background:
+          radial-gradient(circle at var(--ykt-empty-x) var(--ykt-empty-y), rgba(255, 255, 255, .14), transparent 24%),
+          linear-gradient(120deg, rgba(255, 255, 255, .08), transparent 34%, rgba(16, 163, 127, .05));
+        opacity: .45;
+        pointer-events: none;
+        transition: opacity .28s ease;
+      }
+
+      .ykt-empty span {
+        position: relative;
+        z-index: 1;
+      }
+
+      .ykt-empty.is-hovering {
+        border-color: rgba(25, 195, 125, .36);
+        background:
+          radial-gradient(circle at var(--ykt-empty-x) var(--ykt-empty-y), rgba(25, 195, 125, .16), transparent 34%),
+          linear-gradient(180deg, rgba(255, 255, 255, .045), rgba(255, 255, 255, .018)),
+          rgba(255, 255, 255, .042);
+        box-shadow:
+          inset 0 1px rgba(255, 255, 255, .1),
+          0 10px 22px rgba(0, 0, 0, .16),
+          0 0 24px rgba(16, 163, 127, .08);
+      }
+
+      .ykt-empty.is-hovering::before {
+        opacity: .9;
+      }
+
+      .ykt-empty.is-hovering::after {
+        opacity: .72;
+      }
+
+      .ykt-empty.is-launching {
+        pointer-events: none;
+        border-color: rgba(25, 195, 125, .4);
+        background:
+          radial-gradient(circle at 74% 50%, rgba(25, 195, 125, .18), transparent 38%),
+          linear-gradient(180deg, rgba(255, 255, 255, .05), rgba(255, 255, 255, .018)),
+          rgba(255, 255, 255, .042);
+        animation: ykt-empty-launch-card 1.18s cubic-bezier(.18, .9, .2, 1) forwards;
+      }
+
+      .ykt-empty.is-launching span {
+        display: inline-block;
+        animation: ykt-empty-launch-text .98s .12s cubic-bezier(.2, .9, .2, 1) forwards;
+      }
+
+      .ykt-empty.is-launching::before {
+        opacity: .92;
+        animation: ykt-empty-launch-aura 1.18s ease forwards;
+      }
+
+      .ykt-empty.is-launching::after {
+        opacity: .8;
+        animation: ykt-empty-launch-sheen 1.18s ease forwards;
+      }
+
+      @keyframes ykt-empty-launch-card {
+        0% {
+          opacity: 1;
+          transform: perspective(720px) translateY(0) scale(1);
+        }
+        38% {
+          opacity: 1;
+          transform: perspective(720px) translateY(6px) scale(.985);
+        }
+        68% {
+          opacity: .72;
+          transform: perspective(720px) translateY(-8px) scale(.965);
+        }
+        100% {
+          opacity: 0;
+          transform: perspective(720px) translateY(-18px) scale(.92);
+        }
+      }
+
+      @keyframes ykt-empty-launch-text {
+        0% {
+          opacity: 1;
+          transform: translateY(0);
+        }
+        100% {
+          opacity: 0;
+          transform: translateY(-46px);
+        }
+      }
+
+      @keyframes ykt-empty-launch-aura {
+        0% {
+          transform: translateY(0) scale(1);
+        }
+        100% {
+          transform: translateY(-34px) scale(1.25);
+        }
+      }
+
+      @keyframes ykt-empty-launch-sheen {
+        0% {
+          transform: translateX(-10%);
+        }
+        100% {
+          transform: translateX(24%);
+        }
       }
 
       .ykt-summary-card {
@@ -1643,7 +1856,23 @@
         backdrop-filter: blur(10px) saturate(1.08);
         -webkit-backdrop-filter: blur(10px) saturate(1.08);
         overflow: hidden;
-        contain: paint;
+        contain: layout;
+      }
+
+      .ykt-question-card.is-entering {
+        animation: ykt-card-enter .92s cubic-bezier(.16, .84, .24, 1) both;
+        animation-delay: calc(min(var(--ykt-card-order, 1), 10) * 90ms);
+      }
+
+      @keyframes ykt-card-enter {
+        0% {
+          opacity: 0;
+          transform: translateY(14px);
+        }
+        100% {
+          opacity: 1;
+          transform: translateY(0);
+        }
       }
 
       .ykt-question-head,
@@ -1747,6 +1976,15 @@
 
         .ykt-primary-button:hover {
           transform: none;
+        }
+
+        .ykt-question-card,
+        .ykt-answer-row,
+        .ykt-empty.is-launching,
+        .ykt-empty.is-launching span,
+        .ykt-empty.is-launching::before,
+        .ykt-empty.is-launching::after {
+          animation: none;
         }
       }
     `;
@@ -1943,6 +2181,44 @@
       if (Number.isFinite(index)) {
         retryQuestion(index);
       }
+    });
+    list.addEventListener("pointermove", (event) => {
+      if (!(event.target instanceof Element)) {
+        return;
+      }
+
+      const empty = event.target.closest(".ykt-empty");
+      if (!empty) {
+        const currentEmpty = list.querySelector(".ykt-empty.is-hovering");
+        if (currentEmpty) {
+          currentEmpty.classList.remove("is-hovering");
+          currentEmpty.style.setProperty("--ykt-empty-x", "50%");
+          currentEmpty.style.setProperty("--ykt-empty-y", "50%");
+          currentEmpty.style.setProperty("--ykt-empty-rx", "0deg");
+          currentEmpty.style.setProperty("--ykt-empty-ry", "0deg");
+        }
+        return;
+      }
+
+      const rect = empty.getBoundingClientRect();
+      const x = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+      const y = Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height));
+      empty.classList.add("is-hovering");
+      empty.style.setProperty("--ykt-empty-x", `${Math.round(x * 100)}%`);
+      empty.style.setProperty("--ykt-empty-y", `${Math.round(y * 100)}%`);
+      empty.style.setProperty("--ykt-empty-rx", `${((0.5 - y) * 7).toFixed(2)}deg`);
+      empty.style.setProperty("--ykt-empty-ry", `${((x - 0.5) * 9).toFixed(2)}deg`);
+    });
+    list.addEventListener("pointerleave", () => {
+      const empty = list.querySelector(".ykt-empty");
+      if (!empty) {
+        return;
+      }
+      empty.classList.remove("is-hovering");
+      empty.style.setProperty("--ykt-empty-x", "50%");
+      empty.style.setProperty("--ykt-empty-y", "50%");
+      empty.style.setProperty("--ykt-empty-rx", "0deg");
+      empty.style.setProperty("--ykt-empty-ry", "0deg");
     });
 
     body.appendChild(status);
