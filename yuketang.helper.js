@@ -1,10 +1,13 @@
 ﻿// ==UserScript==
 // @name         YukeTang Study Summary Helper
 // @namespace    codex.ykt.study
-// @version      0.1.0
+// @version      0.2.0
 // @description  收集雨课堂结果页题图，并让多模态 AI 直接识图答题。
 // @match        https://changjiang-exam.yuketang.cn/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @connect      *
 // @run-at       document-idle
 // ==/UserScript==
@@ -27,12 +30,13 @@
     imageMaxHeight: 1400,
     imageQuality: 0.82,
     showImagePreview: true,
+    autoSelect: true,
     useProxyRequest: typeof GM_xmlhttpRequest === "function",
     ai: {
       enabled: true,
       endpoint: "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-      apiKey: "YOUR_AI_API_KEY",
-      model: "AI_MODEL_NAME",
+      apiKey: typeof GM_getValue === "function" ? GM_getValue("ykt_api_key", "YOUR_AI_API_KEY") : "YOUR_AI_API_KEY",
+      model: typeof GM_getValue === "function" ? GM_getValue("ykt_model", "AI_MODEL_NAME") : "AI_MODEL_NAME",
       temperature: 0.2,
       requestTimeoutMs: 180000,
       retryCount: 2,
@@ -777,6 +781,29 @@
     });
   }
 
+  function autoSelectOption(block, answer) {
+    if (!block || !answer || !/^[A-D]$/.test(answer)) {
+      return;
+    }
+
+    const optionLabels = block.querySelectorAll(".el-radio, .el-checkbox");
+    if (!optionLabels.length) {
+      return;
+    }
+
+    for (const label of optionLabels) {
+      const input = label.querySelector(".el-radio__original, .el-checkbox__original");
+      const textSpan = label.querySelector(".radioText, .checkboxText");
+      const value = input?.value?.trim() || textSpan?.textContent?.trim() || "";
+
+      if (value.toUpperCase() === answer.toUpperCase()) {
+        label.click();
+        console.log(`[study-helper] 已自动选择第 ${answer} 选项`);
+        return;
+      }
+    }
+  }
+
   function normalizeChoiceAnswer(text) {
     const upper = String(text || "").toUpperCase();
     if (/^\s*X\s*$/.test(upper) || /无法判断|无法识别|不完整/.test(text)) {
@@ -941,6 +968,11 @@
       STATE.data = STATE.data.map((current) =>
         current.index === item.index ? answeredItem : current
       );
+
+      if (CONFIG.autoSelect && answeredItem.sourceBlock) {
+        autoSelectOption(answeredItem.sourceBlock, answeredItem.studySummary);
+      }
+
       renderResults();
     }
 
@@ -1023,6 +1055,11 @@
       STATE.data = STATE.data.map((current) =>
         current?.index === index ? answeredItem : current
       );
+
+      if (CONFIG.autoSelect && answeredItem.sourceBlock) {
+        autoSelectOption(answeredItem.sourceBlock, answeredItem.studySummary);
+      }
+
       renderResults();
       setStatus(`第 ${index} 题重试完成`);
     } catch (error) {
@@ -2162,6 +2199,30 @@
       createButton("识图答题 + 汇总", runVisionAnswerSummary)
     );
 
+    const autoSelectButton = document.createElement("button");
+    autoSelectButton.type = "button";
+    autoSelectButton.className = "ykt-primary-button";
+    autoSelectButton.title = "自动选择开关";
+    const autoSelectLabel = document.createElement("span");
+    autoSelectLabel.textContent = CONFIG.autoSelect ? "自动选择: 开" : "自动选择: 关";
+    autoSelectButton.appendChild(autoSelectLabel);
+    autoSelectButton.addEventListener("click", () => {
+      CONFIG.autoSelect = !CONFIG.autoSelect;
+      autoSelectLabel.textContent = CONFIG.autoSelect ? "自动选择: 开" : "自动选择: 关";
+      setStatus(`自动选择已${CONFIG.autoSelect ? "开启" : "关闭"}`);
+    });
+    actions.appendChild(autoSelectButton);
+
+    const settingsButton = document.createElement("button");
+    settingsButton.type = "button";
+    settingsButton.className = "ykt-primary-button";
+    settingsButton.title = "配置 API Key 和模型";
+    const settingsLabel = document.createElement("span");
+    settingsLabel.textContent = "设置";
+    settingsButton.appendChild(settingsLabel);
+    settingsButton.addEventListener("click", openAiSettings);
+    actions.appendChild(settingsButton);
+
     const tips = document.createElement("div");
     tips.className = "ykt-tips";
     tips.textContent =
@@ -2239,6 +2300,30 @@
     bindPanelDrag(panel, header);
   }
 
+  function openAiSettings() {
+    if (typeof GM_setValue !== "function") {
+      setStatus("当前环境不支持 GM_setValue，无法保存配置。");
+      return;
+    }
+
+    const currentKey = GM_getValue("ykt_api_key", "");
+    const currentModel = GM_getValue("ykt_model", "");
+
+    const newKey = prompt("请输入 API Key（留空则清除）：", currentKey);
+    if (newKey !== null) {
+      GM_setValue("ykt_api_key", newKey);
+      CONFIG.ai.apiKey = newKey;
+    }
+
+    const newModel = prompt("请输入模型 ID（留空则清除）：", currentModel);
+    if (newModel !== null) {
+      GM_setValue("ykt_model", newModel);
+      CONFIG.ai.model = newModel;
+    }
+
+    setStatus("配置已保存。如已修改 API Key 或模型，请重新开始识图答题。");
+  }
+
   function waitForPageStable() {
     return new Promise((resolve) => {
       const timer = window.setInterval(() => {
@@ -2253,7 +2338,10 @@
   async function init() {
     await waitForPageStable();
     buildPanel();
-    setStatus("脚本已就绪。建议先把页面滚动到底部，再点击“识图答题 + 汇总”。");
+    setStatus("脚本已就绪。建议先把页面滚动到底部，再点击“识图答题 + 汇总”");
+    if (typeof GM_registerMenuCommand === "function") {
+      GM_registerMenuCommand("配置 API Key / 模型", openAiSettings);
+    }
     window.__YKT_STUDY_HELPER__ = {
       config: CONFIG,
       state: STATE,
@@ -2261,7 +2349,8 @@
       summarizeWithAi,
       runVisionAnswerSummary,
       retryQuestion,
-      setPanelMinimized
+      setPanelMinimized,
+      openAiSettings
     };
   }
 

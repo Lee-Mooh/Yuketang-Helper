@@ -62,8 +62,20 @@ https://changjiang-exam.yuketang.cn/*
 
 ## 配置
 
-主要配置位于 `yuketang.helper.js` 顶部的 `CONFIG`：
-可在[火山引擎](https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement?advancedActiveKey=model)中获取免费的多模态AI api key
+脚本首次安装后，需要配置 API Key 和模型才能调用 AI 答题。
+
+### 配置方式（二选一）
+
+1. **悬浮面板设置**：点击面板上的 **设置** 按钮，按提示输入 API Key 和模型 ID。
+2. **Tampermonkey 菜单**：点击浏览器工具栏上的 Tampermonkey 图标 → 选择 **配置 API Key / 模型**，按提示输入。
+
+配置会保存在 Tampermonkey 的本地存储中，**更新脚本时不会丢失**，也无需再手动修改代码。
+
+> 可在[火山引擎](https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement?advancedActiveKey=model)中获取免费的多模态 AI API Key。
+
+### 其他配置项
+
+如需调整高级参数，仍可编辑脚本顶部的 `CONFIG`：
 
 ```js
 const CONFIG = {
@@ -72,16 +84,7 @@ const CONFIG = {
   imageMaxWidth: 1400,
   imageMaxHeight: 1400,
   imageQuality: 0.82,
-  showImagePreview: true,
-  ai: {
-    enabled: true,
-    endpoint: "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-    apiKey: "你的 API Key",
-    model: "你的多模态模型 ID",
-    requestTimeoutMs: 180000,
-    retryCount: 2,
-    retryDelayMs: 2500
-  }
+  showImagePreview: true
 };
 ```
 
