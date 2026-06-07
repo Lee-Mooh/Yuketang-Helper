@@ -23,6 +23,7 @@
     requestTimeoutMs: 60000,
     questionMode: "single-choice",
     imageFetchConcurrency: 2,
+    answerConcurrency: typeof GM_getValue === "function" ? Number(GM_getValue("ykt_answer_concurrency", 1)) : 1,
     renderEvery: 1,
     maxEnhancedImagesPerQuestion: 12,
     enhancedSearchPadding: 220,
@@ -955,10 +956,9 @@
 
     let completedCount = 0;
     let activeWorkers = 0;
-
     await runWithConcurrency(
       STATE.data,
-      CONFIG.imageFetchConcurrency,
+      CONFIG.answerConcurrency,
       async (item, i) => {
         activeWorkers += 1;
         try {
@@ -2332,7 +2332,7 @@
 
     const currentKey = GM_getValue("ykt_api_key", "");
     const currentModel = GM_getValue("ykt_model", "");
-
+    const currentConcurrency = GM_getValue("ykt_answer_concurrency", 1);
     const newKey = prompt("请输入 API Key（留空则清除）：", currentKey);
     if (newKey !== null) {
       GM_setValue("ykt_api_key", newKey);
@@ -2344,8 +2344,15 @@
       GM_setValue("ykt_model", newModel);
       CONFIG.ai.model = newModel;
     }
+    const newConcurrency = prompt(`请输入 AI 答题并发数（1-8，当前：${currentConcurrency}，默认 1）：`, String(currentConcurrency));
+    if (newConcurrency !== null) {
+      const num = Math.max(1, Math.min(8, parseInt(newConcurrency, 10) || 1));
+      GM_setValue("ykt_answer_concurrency", num);
+      CONFIG.answerConcurrency = num;
+    }
 
-    setStatus("配置已保存。如已修改 API Key 或模型，请重新开始识图答题。");
+    setStatus(`配置已保存。并发数=${CONFIG.answerConcurrency}。如已修改配置，请重新开始识图答题。`);
+
   }
 
   function waitForPageStable() {
