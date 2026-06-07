@@ -1,4 +1,4 @@
-﻿// ==UserScript==
+// ==UserScript==
 // @name         YukeTang Study Summary Helper
 // @namespace    codex.ykt.study
 // @version      0.2.0
@@ -51,7 +51,7 @@
     orbNode: null,
     statusNode: null,
     listNode: null,
-    answeringIndex: null,
+    answeringIndexes: new Set(),
     retryingIndex: null,
     renderedQuestionIndexes: new Set(),
     workflowRunning: false,
@@ -598,7 +598,7 @@
           "</div>",
           "<div class='ykt-meta-row'>",
           `<span>${detailPreview}</span>`,
-          `<strong class='${getAnswerClass(summaryPreview || "生成中")}'>${summaryPreview || "生成中"}</strong>`,
+          `<strong class='${getAnswerClass(summaryPreview || "AI分析中")}'>${summaryPreview || "AI分析中"}</strong>`,
           "</div>",
           renderImagePreview(item),
           "</article>"
@@ -608,11 +608,11 @@
     items.forEach((item) => STATE.renderedQuestionIndexes.add(item.index));
 
     const visibleSummaryItems = items.filter(
-      (item) => item.studySummary || item.index === STATE.answeringIndex
+      (item) => item.studySummary || STATE.answeringIndexes.has(item.index)
     );
     const answerRows = visibleSummaryItems
       .map((item) => {
-        const answer = normalizeText(item.studySummary || "") || "生成中";
+        const answer = normalizeText(item.studySummary || "") || "AI分析中";
         const safeAnswer = escapeHtml(answer);
         const retryButton =
           item.studySummary && isRetryableAnswer(item.studySummary)
@@ -947,38 +947,62 @@
       throw new Error("请先获取题图");
     }
 
-    STATE.answeringIndex = null;
-    for (let i = 0; i < STATE.data.length; i += 1) {
-      const item = STATE.data[i];
-      STATE.answeringIndex = item.index;
-      renderResults();
+    STATE.answeringIndexes.clear();
+    for (const item of STATE.data) {
+      STATE.answeringIndexes.add(item.index);
+    }
+    renderResults();
 
-      setStatus(
-        `正在请求 AI 直接识图答题...（第 ${i + 1}/${STATE.data.length} 题）`
-      );
-      let answeredItem = await requestAnswerForQuestion(item);
+    let completedCount = 0;
+    let activeWorkers = 0;
 
-      if (isRetryableAnswer(answeredItem.studySummary) && item.sourceBlock) {
-        setStatus(`第 ${item.index} 题未识别完整，正在增强采集后重试...`);
-        answeredItem = await requestAnswerForQuestion(answeredItem, {
-          enhanced: true
-        });
+    await runWithConcurrency(
+      STATE.data,
+      CONFIG.imageFetchConcurrency,
+      async (item, i) => {
+        activeWorkers += 1;
+        try {
+          setStatus(
+            `正在并发请求 AI 识图答题...（${completedCount + 1}/${STATE.data.length} 题，${activeWorkers} 个并发）`
+          );
+
+          let answeredItem = await requestAnswerForQuestion(item);
+
+          if (isRetryableAnswer(answeredItem.studySummary) && item.sourceBlock) {
+            setStatus(`第 ${item.index} 题未识别完整，正在增强采集后重试...`);
+            answeredItem = await requestAnswerForQuestion(answeredItem, {
+              enhanced: true
+            });
+          }
+
+          STATE.data = STATE.data.map((current) =>
+            current.index === item.index ? answeredItem : current
+          );
+
+          completedCount += 1;
+          STATE.answeringIndexes.delete(item.index);
+          renderResults();
+          return answeredItem;
+        } finally {
+          activeWorkers -= 1;
+        }
       }
+    );
 
-      STATE.data = STATE.data.map((current) =>
-        current.index === item.index ? answeredItem : current
-      );
+    STATE.answeringIndexes.clear();
+    renderResults();
+    setStatus("全部答案生成完成，正在自动选择...");
 
-      if (CONFIG.autoSelect && answeredItem.sourceBlock) {
-        autoSelectOption(answeredItem.sourceBlock, answeredItem.studySummary);
+    if (CONFIG.autoSelect) {
+      for (const item of STATE.data) {
+        if (item.sourceBlock && item.studySummary && /^[A-D]$/.test(item.studySummary)) {
+          autoSelectOption(item.sourceBlock, item.studySummary);
+        }
       }
-
-      renderResults();
     }
 
-    STATE.answeringIndex = null;
     renderResults();
-    setStatus("AI 答案生成已完成");
+    setStatus(`AI 答题已完成，共 ${STATE.data.length} 题`);
   }
 
   async function collectQuestionImages() {
@@ -993,7 +1017,7 @@
         throw new Error("没有找到题目块，请先将页面滚动到底部以加载完整内容。");
       }
 
-      STATE.answeringIndex = null;
+      STATE.answeringIndexes.clear();
       STATE.renderedQuestionIndexes.clear();
       STATE.data = [];
       renderResults();
@@ -1045,7 +1069,7 @@
 
     STATE.workflowRunning = true;
     STATE.retryingIndex = index;
-    STATE.answeringIndex = index;
+    STATE.answeringIndexes.add(index);
     try {
       renderResults();
       setStatus(`正在增强采集第 ${index} 题并重新请求 AI...`);
@@ -1067,7 +1091,7 @@
       setStatus(`第 ${index} 题重试失败：${String(error?.message || error)}`);
     } finally {
       STATE.retryingIndex = null;
-      STATE.answeringIndex = null;
+      STATE.answeringIndexes.delete(index);
       STATE.workflowRunning = false;
       renderResults();
     }
