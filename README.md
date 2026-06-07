@@ -1,4 +1,4 @@
-﻿# YukeTang Study Summary Helper
+# YukeTang Study Summary Helper
 
 一个用于雨课堂答题的 Tampermonkey 用户脚本。脚本会在页面右下角生成一个悬浮面板，收集每道题的题图，并调用多模态 AI 直接根据题干和 A/B/C/D 选项推断答案，最后以列表形式汇总。
 
@@ -81,6 +81,7 @@ https://changjiang-exam.yuketang.cn/*
 const CONFIG = {
   maxImagesPerQuestion: 8,
   imageFetchConcurrency: 2,
+  answerConcurrency: 1,
   imageMaxWidth: 1400,
   imageMaxHeight: 1400,
   imageQuality: 0.82,
@@ -92,6 +93,7 @@ const CONFIG = {
 
 - `maxImagesPerQuestion`：每题最多发送多少张图片。题干和选项被拆成多张图时，建议保持 `8` 或更高。
 - `imageFetchConcurrency`：并发获取题图数量。太高可能触发网络或接口限制，建议 `1` 到 `2`。
+- `answerConcurrency`：AI 答题并发数，控制同时请求 AI 的题目数量（1-8），默认 `1`（串行）。
 - `imageMaxWidth` / `imageMaxHeight`：图片压缩尺寸上限。
 - `imageQuality`：JPEG 压缩质量，数值越高越清晰，但请求体越大。
 - `showImagePreview`：是否在面板里显示已发送题图缩略图。
